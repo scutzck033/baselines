@@ -17,15 +17,15 @@ class Model(object):
         act_model = policy(sess, ob_space, ac_space, nbatch_act, 1, reuse=False)
         train_model = policy(sess, ob_space, ac_space, nbatch_train, nsteps, reuse=True)
 
-        A = train_model.pdtype.sample_placeholder([None])
-        ADV = tf.placeholder(tf.float32, [None])
-        R = tf.placeholder(tf.float32, [None])
-        OLDNEGLOGPAC = tf.placeholder(tf.float32, [None])
-        OLDVPRED = tf.placeholder(tf.float32, [None])
-        LR = tf.placeholder(tf.float32, [])
-        CLIPRANGE = tf.placeholder(tf.float32, [])
+        A = train_model.pdtype.sample_placeholder([None]) #action
+        ADV = tf.placeholder(tf.float32, [None]) #advantage
+        R = tf.placeholder(tf.float32, [None]) #return
+        OLDNEGLOGPAC = tf.placeholder(tf.float32, [None]) #old -log(action)
+        OLDVPRED = tf.placeholder(tf.float32, [None]) #old value prediction
+        LR = tf.placeholder(tf.float32, []) #learning rate
+        CLIPRANGE = tf.placeholder(tf.float32, []) #clip range, aka, epsilon
 
-        neglogpac = train_model.pd.neglogp(A)
+        neglogpac = train_model.pd.neglogp(A) #-log(action)
         entropy = tf.reduce_mean(train_model.pd.entropy())
 
         vpred = train_model.vf
@@ -36,10 +36,10 @@ class Model(object):
         ratio = tf.exp(OLDNEGLOGPAC - neglogpac)
         pg_losses = -ADV * ratio
         pg_losses2 = -ADV * tf.clip_by_value(ratio, 1.0 - CLIPRANGE, 1.0 + CLIPRANGE)
-        pg_loss = tf.reduce_mean(tf.maximum(pg_losses, pg_losses2))
+        pg_loss = tf.reduce_mean(tf.maximum(pg_losses, pg_losses2)) # equation(7)
         approxkl = .5 * tf.reduce_mean(tf.square(neglogpac - OLDNEGLOGPAC))
         clipfrac = tf.reduce_mean(tf.to_float(tf.greater(tf.abs(ratio - 1.0), CLIPRANGE)))
-        loss = pg_loss - entropy * ent_coef + vf_loss * vf_coef
+        loss = pg_loss - entropy * ent_coef + vf_loss * vf_coef # equation(9)
         with tf.variable_scope('model'):
             params = tf.trainable_variables()
         grads = tf.gradients(loss, params)
@@ -97,12 +97,14 @@ class Runner(AbstractEnvRunner):
         mb_states = self.states
         epinfos = []
         for _ in range(self.nsteps):
+            # get the action through the model
             actions, values, self.states, neglogpacs = self.model.step(self.obs, self.states, self.dones)
             mb_obs.append(self.obs.copy())
             mb_actions.append(actions)
             mb_values.append(values)
             mb_neglogpacs.append(neglogpacs)
             mb_dones.append(self.dones)
+            # return the observation through interacting the env
             self.obs[:], rewards, self.dones, infos = self.env.step(actions)
             for info in infos:
                 maybeepinfo = info.get('episode')
@@ -129,7 +131,7 @@ class Runner(AbstractEnvRunner):
                 nextvalues = mb_values[t+1]
             delta = mb_rewards[t] + self.gamma * nextvalues * nextnonterminal - mb_values[t]
             mb_advs[t] = lastgaelam = delta + self.gamma * self.lam * nextnonterminal * lastgaelam
-        mb_returns = mb_advs + mb_values
+        mb_returns = mb_advs + mb_values # Return = Advantage + Value
         return (*map(sf01, (mb_obs, mb_returns, mb_dones, mb_actions, mb_values, mb_neglogpacs)),
             mb_states, epinfos)
 # obs, returns, masks, actions, values, neglogpacs, states = runner.run()
@@ -166,6 +168,7 @@ def learn(*, policy, env, nsteps, total_timesteps, ent_coef, lr,
                     nsteps=nsteps, ent_coef=ent_coef, vf_coef=vf_coef,
                     max_grad_norm=max_grad_norm)
     if save_interval and logger.get_dir():
+
         import cloudpickle
         with open(osp.join(logger.get_dir(), 'make_model.pkl'), 'wb') as fh:
             fh.write(cloudpickle.dumps(make_model))
@@ -240,3 +243,24 @@ def learn(*, policy, env, nsteps, total_timesteps, ent_coef, lr,
 
 def safemean(xs):
     return np.nan if len(xs) == 0 else np.mean(xs)
+
+def load_model(policy, env, load_path):
+    nenvs = 1
+    ob_space = env.observation_space
+    ac_space = env.action_space
+
+    sess = tf.get_default_session()
+    act_model = policy(sess, ob_space, ac_space, 1, 1, reuse=False)
+
+    params = tf.trainable_variables()
+
+    def load(load_path):
+        loaded_params = joblib.load(load_path)
+        restores = []
+        for p, loaded_p in zip(params, loaded_params):
+            restores.append(p.assign(loaded_p))
+        sess.run(restores)
+
+    load(load_path)
+
+    return act_model
