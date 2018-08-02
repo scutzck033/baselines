@@ -7,7 +7,7 @@ import tensorflow as tf
 from baselines import logger
 from collections import deque
 from baselines.common import explained_variance
-from baselines.common.runners import AbstractEnvRunner
+from baselines.common.runners import AbstractEnvRunner2
 
 class Model(object):
     def __init__(self, *, policy, ob_space, ac_space, nbatch_act, nbatch_train,
@@ -49,10 +49,10 @@ class Model(object):
         trainer = tf.train.AdamOptimizer(learning_rate=LR, epsilon=1e-5)
         _train = trainer.apply_gradients(grads)
 
-        def train(lr, cliprange, obs, returns, masks, actions, values, neglogpacs, states=None):
+        def train(lr, cliprange, img_obs,vec_obs,returns, masks, actions, values, neglogpacs, states=None):
             advs = returns - values
             advs = (advs - advs.mean()) / (advs.std() + 1e-8)
-            td_map = {train_model.X:obs, A:actions, ADV:advs, R:returns, LR:lr,
+            td_map = {train_model.img_X:img_obs, train_model.vec_X:vec_obs,A:actions, ADV:advs, R:returns, LR:lr,
                     CLIPRANGE:cliprange, OLDNEGLOGPAC:neglogpacs, OLDVPRED:values}
             if states is not None:
                 td_map[train_model.S] = states
@@ -68,6 +68,7 @@ class Model(object):
             joblib.dump(ps, save_path)
 
         def load(load_path):
+            print("******restoring the model*******")
             loaded_params = joblib.load(load_path)
             restores = []
             for p, loaded_p in zip(params, loaded_params):
@@ -85,7 +86,8 @@ class Model(object):
         self.load = load
         tf.global_variables_initializer().run(session=sess) #pylint: disable=E1101
 
-class Runner(AbstractEnvRunner):
+
+class Runner(AbstractEnvRunner2):
 
     def __init__(self, *, env, model, nsteps, gamma, lam):
         super().__init__(env=env, model=model, nsteps=nsteps)
@@ -93,12 +95,18 @@ class Runner(AbstractEnvRunner):
         self.gamma = gamma
 
     def run(self):
-        mb_obs, mb_rewards, mb_actions, mb_values, mb_dones, mb_neglogpacs = [],[],[],[],[],[]
+        mb_obs, mb_rewards, mb_actions, mb_values, mb_dones, mb_neglogpacs = [], [], [], [], [], []
         mb_states = self.states
-        epinfos = []
+
         for _ in range(self.nsteps):
+            curr_step_img_obs, curr_step_vec_obs = [],[]
             # get the action through the model
-            actions, values, self.states, neglogpacs = self.model.step(self.obs, self.states, self.dones)
+            for e in self.obs:
+                curr_step_img_obs.append(e[0])
+                curr_step_vec_obs.append(e[1])
+
+            actions, values, self.states, neglogpacs = self.model.step([np.array(curr_step_img_obs),
+                                                                     np.array(curr_step_vec_obs)], self.states, self.dones)
             mb_obs.append(self.obs.copy())
             mb_actions.append(actions)
             mb_values.append(values)
@@ -106,19 +114,29 @@ class Runner(AbstractEnvRunner):
             mb_dones.append(self.dones)
             # return the observation through interacting the env
             self.obs[:], rewards, self.dones, infos = self.env.step(actions)
-            # for info in infos:
-            #     maybeepinfo = info.get('episode')
-            #     if maybeepinfo: epinfos.append(maybeepinfo)
             mb_rewards.append(rewards)
-        #batch of steps to batch of rollouts
-        mb_obs = np.asarray(mb_obs, dtype=self.obs.dtype)
+
+        # batch of steps to batch of rollouts
+        mb_obs = sf01(np.array(mb_obs))
+        img_obs, vec_obs = [], []
+        for e in mb_obs:
+            img_obs.append(e[0])
+            vec_obs.append(e[1])
+
+        img_obs = np.array(img_obs)
+        vec_obs = np.array(vec_obs)
         mb_rewards = np.asarray(mb_rewards, dtype=np.float32)
         mb_actions = np.asarray(mb_actions)
         mb_values = np.asarray(mb_values, dtype=np.float32)
         mb_neglogpacs = np.asarray(mb_neglogpacs, dtype=np.float32)
         mb_dones = np.asarray(mb_dones, dtype=np.bool)
-        last_values = self.model.value(self.obs, self.states, self.dones)
-        #discount/bootstrap off value fn
+        curr_step_img_obs, curr_step_vec_obs = [], []
+        for e in self.obs:
+            curr_step_img_obs.append(e[0])
+            curr_step_vec_obs.append(e[1])
+        last_values = self.model.value([np.array(curr_step_img_obs),
+                                        np.array(curr_step_vec_obs)], self.states, self.dones)
+        # discount/bootstrap off value fn
         mb_returns = np.zeros_like(mb_rewards)
         mb_advs = np.zeros_like(mb_rewards)
         lastgaelam = 0
@@ -127,13 +145,14 @@ class Runner(AbstractEnvRunner):
                 nextnonterminal = 1.0 - self.dones
                 nextvalues = last_values
             else:
-                nextnonterminal = 1.0 - mb_dones[t+1]
-                nextvalues = mb_values[t+1]
+                nextnonterminal = 1.0 - mb_dones[t + 1]
+                nextvalues = mb_values[t + 1]
             delta = mb_rewards[t] + self.gamma * nextvalues * nextnonterminal - mb_values[t]
             mb_advs[t] = lastgaelam = delta + self.gamma * self.lam * nextnonterminal * lastgaelam
-        mb_returns = mb_advs + mb_values # Return = Advantage + Value
-        return (*map(sf01, (mb_obs, mb_returns, mb_dones, mb_actions, mb_values, mb_neglogpacs)),
-            mb_states, epinfos)
+        mb_returns = mb_advs + mb_values  # Return = Advantage + Value
+
+        return ([img_obs, vec_obs],*map(sf01, (mb_returns, mb_dones, mb_actions, mb_values, mb_neglogpacs)),
+                mb_states)
 
 
 # obs, returns, masks, actions, values, neglogpacs, states = runner.run()
@@ -177,9 +196,10 @@ def learn(*, policy, env, nsteps, total_timesteps, ent_coef, lr,
     model = make_model()
     if load_path is not None:
         model.load(load_path)
+
     runner = Runner(env=env, model=model, nsteps=nsteps, gamma=gamma, lam=lam)
 
-    epinfobuf = deque(maxlen=100)
+
     tfirststart = time.time()
 
     nupdates = total_timesteps//nbatch
@@ -190,9 +210,10 @@ def learn(*, policy, env, nsteps, total_timesteps, ent_coef, lr,
         frac = 1.0 - (update - 1.0) / nupdates
         lrnow = lr(frac)
         cliprangenow = cliprange(frac)
-        obs, returns, masks, actions, values, neglogpacs, states, epinfos = runner.run() #pylint: disable=E0632
-        epinfobuf.extend(epinfos)
+        obs, returns, masks, actions, values, neglogpacs, states = runner.run() #pylint: disable=E0632
         mblossvals = []
+        img_obs = obs[0]
+        vec_obs = obs[1]
         if states is None: # nonrecurrent version
             inds = np.arange(nbatch)
             for _ in range(noptepochs):
@@ -200,7 +221,7 @@ def learn(*, policy, env, nsteps, total_timesteps, ent_coef, lr,
                 for start in range(0, nbatch, nbatch_train):
                     end = start + nbatch_train
                     mbinds = inds[start:end]
-                    slices = (arr[mbinds] for arr in (obs, returns, masks, actions, values, neglogpacs))
+                    slices = (arr[mbinds] for arr in (img_obs, vec_obs, returns, masks, actions, values, neglogpacs))
                     mblossvals.append(model.train(lrnow, cliprangenow, *slices))
         else: # recurrent version
             assert nenvs % nminibatches == 0
@@ -228,8 +249,6 @@ def learn(*, policy, env, nsteps, total_timesteps, ent_coef, lr,
             logger.logkv("total_timesteps", update*nbatch)
             logger.logkv("fps", fps)
             logger.logkv("explained_variance", float(ev))
-            # logger.logkv('eprewmean', safemean([epinfo['r'] for epinfo in epinfobuf]))
-            # logger.logkv('eplenmean', safemean([epinfo['l'] for epinfo in epinfobuf]))
             logger.logkv('time_elapsed', tnow - tfirststart)
             for (lossval, lossname) in zip(lossvals, model.loss_names):
                 logger.logkv(lossname, lossval)
