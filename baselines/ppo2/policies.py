@@ -13,9 +13,34 @@ def nature_cnn(unscaled_images, **conv_kwargs):
     h = activ(conv(scaled_images, 'c1', nf=32, rf=8, stride=4, init_scale=np.sqrt(2),
                    **conv_kwargs))
     h2 = activ(conv(h, 'c2', nf=64, rf=4, stride=2, init_scale=np.sqrt(2), **conv_kwargs))
-#    h3 = activ(conv(h2, 'c3', nf=64, rf=3, stride=1, init_scale=np.sqrt(2), **conv_kwargs))
+    # h3 = activ(conv(h2, 'c3', nf=64, rf=3, stride=1, init_scale=np.sqrt(2), **conv_kwargs))
     h3 = conv_to_fc(h2)
     return activ(fc(h3, 'fc1', nh=512, init_scale=np.sqrt(2)))
+
+def dqn_cnn(scaled_images, **conv_kwargs):
+
+    activ = tf.nn.leaky_relu
+    c1 = activ(conv(scaled_images, 'c1', nf=32, rf=5, stride=1, init_scale=np.sqrt(2),
+                   **conv_kwargs))
+    # p1 = tf.nn.max_pool(c1,[1,2,2,1],[1,1,1,1],padding='SAME',name='p1')
+    c2 = activ(conv(c1, 'c2', nf=64, rf=3, stride=1, init_scale=np.sqrt(2), **conv_kwargs))
+    # p2 = tf.nn.max_pool(c2, [1, 2, 2, 1], [1, 1, 1, 1], padding='SAME', name='p2')
+    c3 = activ(conv(c2, 'c3', nf=64, rf=3, stride=1, init_scale=np.sqrt(2), **conv_kwargs))
+    h1 = conv_to_fc(c3)
+    h1 = activ(fc(h1, 'fc1', nh=256, init_scale=np.sqrt(2)))
+    return activ(fc(h1, 'fc2', nh=128, init_scale=np.sqrt(2)))
+
+def lenet_cnn(scaled_images, **conv_kwargs):
+    activ = tf.nn.leaky_relu
+    c1 = activ(conv(scaled_images, 'c1', nf=6, rf=5, stride=1, init_scale=np.sqrt(2),
+                    **conv_kwargs))
+    p1 = tf.nn.max_pool(c1, [1, 2, 2, 1], [1, 1, 1, 1], padding='SAME', name='p1')
+    c2 = activ(conv(p1, 'c2', nf=16, rf=5, stride=1, init_scale=np.sqrt(2), **conv_kwargs))
+    p2 = tf.nn.max_pool(c2, [1, 2, 2, 1], [1, 1, 1, 1], padding='SAME', name='p2')
+    c3 = activ(conv(p2, 'c3', nf=120, rf=5, stride=1, init_scale=np.sqrt(2), **conv_kwargs))
+    h1 = conv_to_fc(c3)
+    return activ(fc(h1, 'fc1', nh=128, init_scale=np.sqrt(2)))
+
 
 class LnLstmPolicy(object):
     def __init__(self, sess, ob_space, ac_space, nbatch, nsteps, nlstm=256, reuse=False):
@@ -93,7 +118,7 @@ class CnnPolicy(object):
         self.pdtype = make_pdtype(ac_space)
         X, processed_x = observation_input(ob_space, nbatch)
         with tf.variable_scope("model", reuse=reuse):
-            h = nature_cnn(processed_x, **conv_kwargs)
+            h = dqn_cnn(processed_x, **conv_kwargs)
             vf = fc(h, 'v', 1)[:,0]
             self.pd, self.pi = self.pdtype.pdfromlatent(h, init_scale=0.01)
 
@@ -141,6 +166,51 @@ class MlpPolicy(object):
             return sess.run(vf, {X:ob})
 
         self.X = X
+        self.vf = vf
+        self.step = step
+        self.value = value
+
+class twoStreamCNNPolicy(object):
+
+    def __init__(self, sess, ob_space, ac_space, nbatch, nsteps, reuse=False, **conv_kwargs): #pylint: disable=W0613
+        self.pdtype = make_pdtype(ac_space)
+        img_X, processed_img_x = observation_input(ob_space[0], nbatch)
+        vec_X, processed_vec_x = observation_input(ob_space[1], nbatch)
+        with tf.variable_scope("model", reuse=reuse):
+            # img feature extractor
+            img_h = lenet_cnn(processed_img_x, **conv_kwargs)
+
+            # vec feature extractor
+            activ = tf.nn.leaky_relu
+
+            vec_h1 = activ(fc(processed_vec_x, 'pi_fc1', nh=32, init_scale=np.sqrt(2)))
+            vec_h = activ(fc(vec_h1, 'pi_fc2', nh=64, init_scale=np.sqrt(2)))
+
+            # feature concat
+            h = tf.concat([img_h,vec_h],1)
+
+            vf = fc(h, 'v', 1)[:, 0]
+            self.pd, self.pi = self.pdtype.pdfromlatent(h, init_scale=0.01)
+
+        a0 = self.pd.sample()
+        neglogp0 = self.pd.neglogp(a0)
+        self.initial_state = None
+
+        def step(ob, *_args, **_kwargs):
+            img_x_input = ob[0]
+            vec_x_input = ob[1]
+
+            a, v, neglogp = sess.run([a0, vf, neglogp0], {img_X:img_x_input,vec_X:vec_x_input})
+            return a, v, self.initial_state, neglogp
+
+        def value(ob, *_args, **_kwargs):
+            img_x_input = ob[0]
+            vec_x_input = ob[1]
+
+            return sess.run(vf, {img_X:img_x_input,vec_X:vec_x_input})
+
+        self.img_X = img_X
+        self.vec_X = vec_X
         self.vf = vf
         self.step = step
         self.value = value
