@@ -260,14 +260,14 @@ def learn(*, policy, env, nsteps, total_timesteps, ent_coef, lr,
             logger.logkv("fps", fps)
             logger.logkv("explained_variance", float(ev))
             logger.logkv('mean_rew',safemean(rewards))
-            logger.logkv('backing',backing_indicators.__contains__(False))
+            logger.logkv('backing',backing_indicators.__contains__(True))
             # logger.logkv('eprewmean', safemean([epinfo['r'] for epinfo in epinfobuf]))
             # logger.logkv('eplenmean', safemean([epinfo['l'] for epinfo in epinfobuf]))
             logger.logkv('time_elapsed', tnow - tfirststart)
             for (lossval, lossname) in zip(lossvals, model.loss_names):
                 logger.logkv(lossname, lossval)
             logger.dumpkvs()
-        if save_interval and (backing_indicators.__contains__('True') or update % save_interval == 0 or update == 1) and logger.get_dir():
+        if save_interval and (backing_indicators.__contains__(True) or update % save_interval == 0 or update == 1) and logger.get_dir():
             checkdir = osp.join(logger.get_dir(), 'checkpoints')
             os.makedirs(checkdir, exist_ok=True)
             savepath = osp.join(checkdir, '%.5i'%update)
