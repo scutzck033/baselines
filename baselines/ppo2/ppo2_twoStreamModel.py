@@ -95,9 +95,9 @@ class Runner(AbstractEnvRunner2):
         self.gamma = gamma
 
     def run(self):
-        mb_obs, mb_rewards, mb_actions, mb_values, mb_dones, mb_neglogpacs = [], [], [], [], [], []
+        mb_obs, mb_rewards, mb_actions, mb_values, mb_dones, mb_neglogpacs,mb_epinfos = [], [], [], [], [], [],[]
         mb_states = self.states
-
+        epinfos = []
         for _ in range(self.nsteps):
             curr_step_img_obs, curr_step_vec_obs = [],[]
             # get the action through the model
@@ -114,6 +114,10 @@ class Runner(AbstractEnvRunner2):
             mb_dones.append(self.dones)
             # return the observation through interacting the env
             self.obs[:], rewards, self.dones, infos = self.env.step(actions)
+            # for info in infos:
+            #     maybeepinfo = info.get('episode')
+            #     if maybeepinfo: epinfos.append(maybeepinfo)
+            mb_epinfos.append(infos)
             mb_rewards.append(rewards)
 
         # batch of steps to batch of rollouts
@@ -140,7 +144,10 @@ class Runner(AbstractEnvRunner2):
         mb_returns = np.zeros_like(mb_rewards)
         mb_advs = np.zeros_like(mb_rewards)
         lastgaelam = 0
+        mb_backingIndicator = []
+
         for t in reversed(range(self.nsteps)):
+            curr_mb_epinfos = mb_epinfos[t]
             if t == self.nsteps - 1:
                 nextnonterminal = 1.0 - self.dones
                 nextvalues = last_values
@@ -149,10 +156,12 @@ class Runner(AbstractEnvRunner2):
                 nextvalues = mb_values[t + 1]
             delta = mb_rewards[t] + self.gamma * nextvalues * nextnonterminal - mb_values[t]
             mb_advs[t] = lastgaelam = delta + self.gamma * self.lam * nextnonterminal * lastgaelam
+            for i in range(self.env.num_envs):
+                mb_backingIndicator.append(curr_mb_epinfos[i])
         mb_returns = mb_advs + mb_values  # Return = Advantage + Value
 
-        return ([img_obs, vec_obs],*map(sf01, (mb_returns, mb_dones, mb_actions, mb_values, mb_neglogpacs)),
-                mb_states)
+        return ([img_obs, vec_obs],*map(sf01, (mb_returns, mb_dones, mb_actions, mb_values, mb_neglogpacs,mb_rewards)),
+                mb_backingIndicator,mb_states,epinfos)
 
 
 # obs, returns, masks, actions, values, neglogpacs, states = runner.run()
@@ -189,7 +198,6 @@ def learn(*, policy, env, nsteps, total_timesteps, ent_coef, lr,
                     nsteps=nsteps, ent_coef=ent_coef, vf_coef=vf_coef,
                     max_grad_norm=max_grad_norm)
     if save_interval and logger.get_dir():
-
         import cloudpickle
         with open(osp.join(logger.get_dir(), 'make_model.pkl'), 'wb') as fh:
             fh.write(cloudpickle.dumps(make_model))
@@ -199,7 +207,7 @@ def learn(*, policy, env, nsteps, total_timesteps, ent_coef, lr,
 
     runner = Runner(env=env, model=model, nsteps=nsteps, gamma=gamma, lam=lam)
 
-
+    epinfobuf = deque(maxlen=100)
     tfirststart = time.time()
 
     nupdates = total_timesteps//nbatch
@@ -210,7 +218,8 @@ def learn(*, policy, env, nsteps, total_timesteps, ent_coef, lr,
         frac = 1.0 - (update - 1.0) / nupdates
         lrnow = lr(frac)
         cliprangenow = cliprange(frac)
-        obs, returns, masks, actions, values, neglogpacs, states = runner.run() #pylint: disable=E0632
+        obs, returns, masks, actions, values, neglogpacs, rewards, backing_indicators ,states, epinfos = runner.run() #pylint: disable=E0632
+        epinfobuf.extend(epinfos)
         mblossvals = []
         img_obs = obs[0]
         vec_obs = obs[1]
@@ -242,6 +251,7 @@ def learn(*, policy, env, nsteps, total_timesteps, ent_coef, lr,
         lossvals = np.mean(mblossvals, axis=0)
         tnow = time.time()
         fps = int(nbatch / (tnow - tstart))
+
         if update % log_interval == 0 or update == 1:
             ev = explained_variance(values, returns)
             logger.logkv("serial_timesteps", update*nsteps)
@@ -249,11 +259,15 @@ def learn(*, policy, env, nsteps, total_timesteps, ent_coef, lr,
             logger.logkv("total_timesteps", update*nbatch)
             logger.logkv("fps", fps)
             logger.logkv("explained_variance", float(ev))
+            logger.logkv('mean_rew',safemean(rewards))
+            logger.logkv('backing',backing_indicators.__contains__(False))
+            # logger.logkv('eprewmean', safemean([epinfo['r'] for epinfo in epinfobuf]))
+            # logger.logkv('eplenmean', safemean([epinfo['l'] for epinfo in epinfobuf]))
             logger.logkv('time_elapsed', tnow - tfirststart)
             for (lossval, lossname) in zip(lossvals, model.loss_names):
                 logger.logkv(lossname, lossval)
             logger.dumpkvs()
-        if save_interval and (update % save_interval == 0 or update == 1) and logger.get_dir():
+        if save_interval and (backing_indicators.__contains__('True') or update % save_interval == 0 or update == 1) and logger.get_dir():
             checkdir = osp.join(logger.get_dir(), 'checkpoints')
             os.makedirs(checkdir, exist_ok=True)
             savepath = osp.join(checkdir, '%.5i'%update)
