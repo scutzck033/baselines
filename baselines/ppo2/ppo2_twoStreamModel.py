@@ -120,6 +120,7 @@ class Runner(AbstractEnvRunner2):
             mb_epinfos.append(infos)
             mb_rewards.append(rewards)
 
+
         # batch of steps to batch of rollouts
         mb_obs = sf01(np.array(mb_obs))
         img_obs, vec_obs = [], []
@@ -145,6 +146,9 @@ class Runner(AbstractEnvRunner2):
         mb_advs = np.zeros_like(mb_rewards)
         lastgaelam = 0
         mb_backingIndicator = []
+        mb_walkaroundIndicator = []
+        mb_taskfinishedIndicator = []
+
 
         for t in reversed(range(self.nsteps)):
             curr_mb_epinfos = mb_epinfos[t]
@@ -157,11 +161,13 @@ class Runner(AbstractEnvRunner2):
             delta = mb_rewards[t] + self.gamma * nextvalues * nextnonterminal - mb_values[t]
             mb_advs[t] = lastgaelam = delta + self.gamma * self.lam * nextnonterminal * lastgaelam
             for i in range(self.env.num_envs):
-                mb_backingIndicator.append(curr_mb_epinfos[i])
+                mb_walkaroundIndicator.append(curr_mb_epinfos[i]['walkaround'])
+                mb_backingIndicator.append(curr_mb_epinfos[i]['back'])
+                mb_taskfinishedIndicator.append(curr_mb_epinfos[i]['finished'])
         mb_returns = mb_advs + mb_values  # Return = Advantage + Value
 
         return ([img_obs, vec_obs],*map(sf01, (mb_returns, mb_dones, mb_actions, mb_values, mb_neglogpacs,mb_rewards)),
-                mb_backingIndicator,mb_states,epinfos)
+                mb_walkaroundIndicator,mb_backingIndicator,mb_taskfinishedIndicator,mb_states,epinfos)
 
 
 # obs, returns, masks, actions, values, neglogpacs, states = runner.run()
@@ -218,11 +224,21 @@ def learn(*, policy, env, nsteps, total_timesteps, ent_coef, lr,
         frac = 1.0 - (update - 1.0) / nupdates
         lrnow = lr(frac)
         cliprangenow = cliprange(frac)
-        obs, returns, masks, actions, values, neglogpacs, rewards, backing_indicators ,states, epinfos = runner.run() #pylint: disable=E0632
+        obs, returns, masks, actions, values, neglogpacs, rewards, was,backs,finishes ,states, epinfos = runner.run() #pylint: disable=E0632
         epinfobuf.extend(epinfos)
         mblossvals = []
         img_obs = obs[0]
         vec_obs = obs[1]
+
+        if save_interval and (was.__contains__(True) or backs.__contains__(True) or finishes.__contains__(True)
+                              or update % save_interval == 0 or update == 1) and logger.get_dir():
+        # if save_interval and (update % save_interval == 0 or update == 1) and logger.get_dir():
+            checkdir = osp.join(logger.get_dir(), 'checkpoints')
+            os.makedirs(checkdir, exist_ok=True)
+            savepath = osp.join(checkdir, '%.5i' % update)
+            print('Saving to', savepath)
+            model.save(savepath)
+
         if states is None: # nonrecurrent version
             inds = np.arange(nbatch)
             for _ in range(noptepochs):
@@ -252,6 +268,7 @@ def learn(*, policy, env, nsteps, total_timesteps, ent_coef, lr,
         tnow = time.time()
         fps = int(nbatch / (tnow - tstart))
 
+        # if (backing_indicators.__contains__(True)) and (update % log_interval == 0 or update == 1):
         if update % log_interval == 0 or update == 1:
             ev = explained_variance(values, returns)
             logger.logkv("serial_timesteps", update*nsteps)
@@ -260,19 +277,16 @@ def learn(*, policy, env, nsteps, total_timesteps, ent_coef, lr,
             logger.logkv("fps", fps)
             logger.logkv("explained_variance", float(ev))
             logger.logkv('mean_rew',safemean(rewards))
-            logger.logkv('backing',backing_indicators.__contains__(True))
+            logger.logkv('walking around', was.__contains__(True))
+            logger.logkv('backing',backs.__contains__(True))
+            logger.logkv('task finished', finishes.__contains__(True))
             # logger.logkv('eprewmean', safemean([epinfo['r'] for epinfo in epinfobuf]))
             # logger.logkv('eplenmean', safemean([epinfo['l'] for epinfo in epinfobuf]))
             logger.logkv('time_elapsed', tnow - tfirststart)
             for (lossval, lossname) in zip(lossvals, model.loss_names):
                 logger.logkv(lossname, lossval)
             logger.dumpkvs()
-        if save_interval and (backing_indicators.__contains__(True) or update % save_interval == 0 or update == 1) and logger.get_dir():
-            checkdir = osp.join(logger.get_dir(), 'checkpoints')
-            os.makedirs(checkdir, exist_ok=True)
-            savepath = osp.join(checkdir, '%.5i'%update)
-            print('Saving to', savepath)
-            model.save(savepath)
+
     env.close()
     return model
 
