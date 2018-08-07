@@ -4,6 +4,17 @@ from baselines.a2c.utils import conv, fc, conv_to_fc, batch_to_seq, seq_to_batch
 from baselines.common.distributions import make_pdtype
 from baselines.common.input import observation_input
 
+def weight_variable(shape):
+    initial = tf.truncated_normal(shape, stddev=0.01)
+    return tf.Variable(initial)
+
+def bias_variable(shape):
+    initial = tf.constant(0.0, shape=shape)
+    return tf.Variable(initial)
+
+def fully_connected(x,w,b):
+    return tf.matmul(x, w) + b
+
 def nature_cnn(unscaled_images, **conv_kwargs):
     """
     CNN from Nature paper.
@@ -16,6 +27,66 @@ def nature_cnn(unscaled_images, **conv_kwargs):
     # h3 = activ(conv(h2, 'c3', nf=64, rf=3, stride=1, init_scale=np.sqrt(2), **conv_kwargs))
     h3 = conv_to_fc(h2)
     return activ(fc(h3, 'fc1', nh=512, init_scale=np.sqrt(2)))
+
+def vgg19_cnn(scaled_images, **conv_kwargs):
+    activ = tf.nn.relu
+    #stage 1
+    c1_1 = activ(conv(scaled_images, 'c1_1', nf=16, rf=3, stride=1, init_scale=np.sqrt(2),
+                    **conv_kwargs))
+    c1_2 = activ(conv(c1_1, 'c1_2', nf=16, rf=3, stride=1, init_scale=np.sqrt(2),
+                **conv_kwargs))
+    p1 = tf.nn.max_pool(c1_2, [1, 2, 2, 1], [1, 1, 1, 1], padding='SAME', name='p1')
+
+    #stage 2
+    c2_1 = activ(conv(p1, 'c2_1', nf=32, rf=3, stride=1, init_scale=np.sqrt(2),
+                **conv_kwargs))
+    c2_2 = activ(conv(c2_1, 'c2_2', nf=32, rf=3, stride=1, init_scale=np.sqrt(2),
+                **conv_kwargs))
+    p2 = tf.nn.max_pool(c2_2, [1, 2, 2, 1], [1, 1, 1, 1], padding='SAME', name='p2')
+
+    #stage 3
+    c3_1 = activ(conv(p2, 'c3_1', nf=64, rf=3, stride=1, init_scale=np.sqrt(2),
+                **conv_kwargs))
+    c3_2 = activ(conv(c3_1, 'c3_2', nf=64, rf=3, stride=1, init_scale=np.sqrt(2),
+                **conv_kwargs))
+    c3_3 = activ(conv(c3_2, 'c3_3', nf=64, rf=3, stride=1, init_scale=np.sqrt(2),
+                **conv_kwargs))
+    c3_4 = activ(conv(c3_3, 'c3_4', nf=64, rf=3, stride=1, init_scale=np.sqrt(2),
+                **conv_kwargs))
+    p3 = tf.nn.max_pool(c3_4, [1, 2, 2, 1], [1, 1, 1, 1], padding='SAME', name='p3')
+
+    #stage 4
+    c4_1 = activ(conv(p3, 'c4_1', nf=64, rf=3, stride=1, init_scale=np.sqrt(2),
+                **conv_kwargs))
+    c4_2 = activ(conv(c4_1, 'c4_2', nf=64, rf=3, stride=1, init_scale=np.sqrt(2),
+                **conv_kwargs))
+    c4_3 = activ(conv(c4_2, 'c4_3', nf=64, rf=3, stride=1, init_scale=np.sqrt(2),
+                **conv_kwargs))
+    c4_4 = activ(conv(c4_3, 'c4_4', nf=64, rf=3, stride=1, init_scale=np.sqrt(2),
+                **conv_kwargs))
+    p4 = tf.nn.max_pool(c4_4, [1, 2, 2, 1], [1, 1, 1, 1], padding='SAME', name='p4')
+
+    #stage 5
+    c5_1 = activ(conv(p4, 'c5_1', nf=64, rf=3, stride=1, init_scale=np.sqrt(2),
+                **conv_kwargs))
+    c5_2 =activ(conv(c5_1, 'c5_2', nf=64, rf=3, stride=1, init_scale=np.sqrt(2),
+                **conv_kwargs))
+    c5_3 = activ(conv(c5_2, 'c5_3', nf=64, rf=3, stride=1, init_scale=np.sqrt(2),
+                **conv_kwargs))
+    c5_4 = activ(conv(c5_3, 'c5_4', nf=64, rf=3, stride=1, init_scale=np.sqrt(2),
+                **conv_kwargs))
+    p5 = tf.nn.max_pool(c5_4, [1, 2, 2, 1], [1, 1, 1, 1], padding='SAME', name='p5')
+    print(np.shape(p5))
+    h1 = conv_to_fc(p5)
+    print(np.shape(h1))
+    # h1 = activ(fc(h1, 'fc1', nh=256, init_scale=np.sqrt(2)))
+    # h2 = activ(fc(h1, 'fc2', nh=128, init_scale=np.sqrt(2)))
+    # h3 = activ(fc(h2, 'fc2', nh=128, init_scale=np.sqrt(2)))
+    h1 = activ(fully_connected(h1, weight_variable([409600, 256]), bias_variable([256])))
+    h2 = activ(fully_connected(h1, weight_variable([256, 128]), bias_variable([128])))
+    print(np.shape(h2))
+
+    return h2
 
 def dqn_cnn(scaled_images, **conv_kwargs):
 
@@ -178,13 +249,13 @@ class twoStreamCNNPolicy(object):
         vec_X, processed_vec_x = observation_input(ob_space[1], nbatch)
         with tf.variable_scope("model", reuse=reuse):
             # img feature extractor
-            img_h = lenet_cnn(processed_img_x, **conv_kwargs)
+            img_h = vgg19_cnn(processed_img_x, **conv_kwargs)
 
             # vec feature extractor
-            activ = tf.nn.leaky_relu
+            activ = tf.nn.relu
 
-            vec_h1 = activ(fc(processed_vec_x, 'pi_fc1', nh=32, init_scale=np.sqrt(2)))
-            vec_h = activ(fc(vec_h1, 'pi_fc2', nh=64, init_scale=np.sqrt(2)))
+            vec_h1 = activ(fc(processed_vec_x, 'pi_fc1', nh=64, init_scale=np.sqrt(2)))
+            vec_h = activ(fc(vec_h1, 'pi_fc2', nh=128, init_scale=np.sqrt(2)))
 
             # feature concat
             h = tf.concat([img_h,vec_h],1)
