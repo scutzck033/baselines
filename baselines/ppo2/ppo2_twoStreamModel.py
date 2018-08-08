@@ -230,7 +230,7 @@ def learn(*, policy, env, nsteps, total_timesteps, ent_coef, lr,
         img_obs = obs[0]
         vec_obs = obs[1]
 
-        if save_interval and (was.__contains__(True) or backs.__contains__(True) or finishes.__contains__(True)
+        if save_interval and (backs.__contains__(True) or finishes.__contains__(True)
                               or update % save_interval == 0 or update == 1) and logger.get_dir():
         # if save_interval and (update % save_interval == 0 or update == 1) and logger.get_dir():
             checkdir = osp.join(logger.get_dir(), 'checkpoints')
