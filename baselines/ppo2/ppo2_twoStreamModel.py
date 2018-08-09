@@ -235,7 +235,18 @@ def learn(*, policy, env, nsteps, total_timesteps, ent_coef, lr,
         # if save_interval and (update % save_interval == 0 or update == 1) and logger.get_dir():
             checkdir = osp.join(logger.get_dir(), 'checkpoints')
             os.makedirs(checkdir, exist_ok=True)
-            savepath = osp.join(checkdir, '%.5i' % update)
+            indicate_str = ['0','0','0','_']
+            if was.__contains__(True):
+                indicate_str[0]='1'
+            if backs.__contains__(True):
+                indicate_str[1]='1'
+            if finishes.__contains__(True):
+                indicate_str[2]='1'
+            model_id = '%.5i' % update
+            indicate_str.append(model_id)
+            model_name = "".join(indicate_str)
+            savepath = osp.join(checkdir,model_name)
+           # savepath = osp.join(checkdir, '%.5i' % update)
             print('Saving to', savepath)
             model.save(savepath)
 
