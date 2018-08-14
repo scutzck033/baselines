@@ -285,3 +285,54 @@ class twoStreamCNNPolicy(object):
         self.vf = vf
         self.step = step
         self.value = value
+  
+
+class CnnVecSplitPolicy(object):
+
+    def __init__(self, sess, ob_space, obs_dict,ac_space, nbatch, nsteps, reuse=False, **conv_kwargs): #pylint: disable=W0613
+        self.pdtype = make_pdtype(ac_space)
+        ob1_space_size_per_frame=obs_dict['img_obs_shape'][0]*obs_dict['img_obs_shape'][1]*obs_dict['img_obs_shape'][2]
+        ob2_space_size_per_frame = obs_dict['vec_obs_shape']
+
+        X, processed_x = observation_input(ob_space, nbatch)
+        print(np.shape(processed_x))
+        with tf.variable_scope("model", reuse=reuse):
+            img_obs_begin = [0,0]
+            img_obs_size = [-1,ob1_space_size_per_frame]
+            vec_obs_begin = [0,ob1_space_size_per_frame]
+            vec_obs_size = [-1,ob2_space_size_per_frame]
+            img_vec_like = tf.slice(processed_x,img_obs_begin,img_obs_size)
+            vec_input = tf.slice(processed_x,vec_obs_begin,vec_obs_size)
+            img_input = tf.reshape(img_vec_like,(nbatch,obs_dict['img_obs_shape'][0],obs_dict['img_obs_shape'][1],
+                                                 obs_dict['img_obs_shape'][2]))
+            print("vec_input",vec_input)
+            print("img_input",img_input)
+            # img feature extractor
+            img_h = dqn_cnn(img_input, **conv_kwargs)
+
+            # vec feature extractor
+            activ = tf.nn.relu
+
+            vec_h1 = activ(fc(vec_input, 'pi_fc1', nh=64, init_scale=np.sqrt(2)))
+            vec_h = activ(fc(vec_h1, 'pi_fc2', nh=128, init_scale=np.sqrt(2)))
+
+            # feature concat
+            h = tf.concat([img_h, vec_h], 1)
+            vf = fc(h, 'v', 1)[:,0]
+            self.pd, self.pi = self.pdtype.pdfromlatent(h, init_scale=0.01)
+
+        a0 = self.pd.sample()
+        neglogp0 = self.pd.neglogp(a0)
+        self.initial_state = None
+
+        def step(ob, *_args, **_kwargs):
+            a, v, neglogp = sess.run([a0, vf, neglogp0], {X:ob})
+            return a, v, self.initial_state, neglogp
+
+        def value(ob, *_args, **_kwargs):
+            return sess.run(vf, {X:ob})
+
+        self.X = X
+        self.vf = vf
+        self.step = step
+        self.value = value
