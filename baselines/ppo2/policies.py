@@ -82,20 +82,20 @@ def vgg19_cnn(scaled_images, **conv_kwargs):
     # h1 = activ(fc(h1, 'fc1', nh=256, init_scale=np.sqrt(2)))
     # h2 = activ(fc(h1, 'fc2', nh=128, init_scale=np.sqrt(2)))
     # h3 = activ(fc(h2, 'fc2', nh=128, init_scale=np.sqrt(2)))
-    h1 = activ(fully_connected(h1, weight_variable([409600, 256]), bias_variable([256])))
-    h2 = activ(fully_connected(h1, weight_variable([256, 128]), bias_variable([128])))
+    h1 = activ(fully_connected(h1, weight_variable([409600, 1024]), bias_variable([256])))
+    h2 = activ(fully_connected(h1, weight_variable([1024, 256]), bias_variable([128])))
     print(np.shape(h2))
 
     return h2
 
 def dqn_cnn(scaled_images, **conv_kwargs):
 
-    activ = tf.nn.leaky_relu
+    activ = tf.nn.relu
     c1 = activ(conv(scaled_images, 'c1', nf=32, rf=5, stride=1, init_scale=np.sqrt(2),
                    **conv_kwargs))
-    # p1 = tf.nn.max_pool(c1,[1,2,2,1],[1,1,1,1],padding='SAME',name='p1')
+    p1 = tf.nn.max_pool(c1,[1,2,2,1],[1,1,1,1],padding='SAME',name='p1')
     c2 = activ(conv(c1, 'c2', nf=64, rf=3, stride=1, init_scale=np.sqrt(2), **conv_kwargs))
-    # p2 = tf.nn.max_pool(c2, [1, 2, 2, 1], [1, 1, 1, 1], padding='SAME', name='p2')
+    p2 = tf.nn.max_pool(c2, [1, 2, 2, 1], [1, 1, 1, 1], padding='SAME', name='p2')
     c3 = activ(conv(c2, 'c3', nf=64, rf=3, stride=1, init_scale=np.sqrt(2), **conv_kwargs))
     h1 = conv_to_fc(c3)
     h1 = activ(fc(h1, 'fc1', nh=256, init_scale=np.sqrt(2)))
@@ -329,13 +329,14 @@ class CnnVecSplitPolicy(object):
             # vec feature extractor
             activ = tf.nn.relu
 
-            vec_h1 = activ(fc(vec_input, 'pi_fc1', nh=64, init_scale=np.sqrt(2)))
-            vec_h = activ(fc(vec_h1, 'pi_fc2', nh=128, init_scale=np.sqrt(2)))
+            vec_h1 = activ(fc(vec_input, 'pi_fc1', nh=32, init_scale=np.sqrt(2)))
+            vec_h = activ(fc(vec_h1, 'pi_fc2', nh=64, init_scale=np.sqrt(2)))
 
             # feature concat
-            h = tf.concat([img_h, vec_h], 1)
-            vf = fc(h, 'v', 1)[:,0]
-            self.pd, self.pi = self.pdtype.pdfromlatent(h, init_scale=0.01)
+            h1 = tf.concat([img_h, vec_h], 1)
+            h2 = activ(fc(h1, 'final_fc2', nh=64, init_scale=np.sqrt(2)))
+            vf = fc(h2, 'v', 1)[:,0]
+            self.pd, self.pi = self.pdtype.pdfromlatent(h2, init_scale=0.01)
 
         a0 = self.pd.sample()
         neglogp0 = self.pd.neglogp(a0)
